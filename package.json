@@ -1,13 +1,17 @@
 {
   "name": "social-media-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "Tenovio LinkedIn Marketing Agent",
   "type": "module",
-  "main": "src/index.js",
+  "scripts": {
+    "start": "node post-now.mjs",
+    "agent": "node agent-start.mjs",
+    "dashboard": "node src/approvalServer.mjs",
+    "scheduler": "node src/scheduler.mjs",
+    "generate": "node -e \"import('./src/agent.mjs').then(m => m.generatePost(0).then(p => m.savePendingPost(p)).then(() => { console.log('Post generated! Open http://localhost:3000'); process.exit(0); }))\""
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "axios": "^1.7.0",
-    "dotenv": "^16.4.0",
-    "node-cron": "^3.0.3",
-    "uuid": "^10.0.0"
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.0.0"
   }
 }
