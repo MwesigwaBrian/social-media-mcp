@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { generatePost, savePendingPost, getPendingPosts, updatePostStatus, deletePost } from "./src/agent.mjs";
 import { approveAndPost } from "./src/linkedin.mjs";
+import { updatePostAnalytics, getAllAnalytics } from "./src/analytics.mjs";
+import { sendWeeklyReport } from "./src/emailReport.mjs";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
@@ -241,3 +243,34 @@ async function scheduleLoop() {
 }
 
 scheduleLoop().catch(console.error);
+
+// ─── Analytics Poller (runs every 6 hours) ──────────────────────────────────
+
+async function pollAnalytics() {
+  console.log("📊 Polling LinkedIn analytics...");
+  try {
+    const records = await getAllAnalytics();
+    for (const record of records) {
+      await updatePostAnalytics(record.postId);
+    }
+    console.log(`✅ Updated analytics for ${records.length} posts`);
+  } catch (err) {
+    console.error("❌ Analytics poll failed:", err.message);
+  }
+}
+
+// Poll every 6 hours
+setInterval(pollAnalytics, 6 * 60 * 60 * 1000);
+
+// ─── Weekly Email Report (every Monday at 8AM) ───────────────────────────────
+
+async function checkWeeklyReport() {
+  const now = new Date();
+  if (now.getDay() === 1 && now.getHours() === 8 && now.getMinutes() < 5) {
+    console.log("📧 Sending weekly LinkedIn report...");
+    await sendWeeklyReport();
+  }
+}
+
+// Check every 5 minutes if it's time to send the weekly report
+setInterval(checkWeeklyReport, 5 * 60 * 1000);
