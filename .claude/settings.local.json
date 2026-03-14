@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node post-now.mjs)",
+      "Bash(node -e \"const fs=require\\(''fs''\\); const raw=fs.readFileSync\\(''.env''\\); console.log\\(raw.slice\\(0,4\\).toString\\(''hex''\\)\\); const txt=raw.toString\\(''utf16le''\\); console.log\\(JSON.stringify\\(txt.slice\\(0,100\\)\\)\\);\")"
+    ]
+  }
+}
