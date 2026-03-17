@@ -157,13 +157,25 @@ const server = http.createServer(async (req, res) => {
 
     // ── Email approve/reject one-click links ──────────────────────────────
     if (req.method === "GET" && route === "/approve-email") {
-      const post = posts.find(p => p.id === query.id && p.token === query.token);
-      if (!post) {
-        res.writeHead(404, {"Content-Type":"text/html"});
-        res.end(`<div style="font-family:sans-serif;text-align:center;padding:60px">Post not found or already actioned.</div>`);
+      let postData;
+      try {
+        postData = JSON.parse(Buffer.from(query.payload, "base64url").toString());
+      } catch(e) {
+        res.writeHead(400, {"Content-Type":"text/html"});
+        res.end(`<div style="font-family:sans-serif;text-align:center;padding:60px">Invalid approval link.</div>`);
         return;
       }
-      const result = await approveAndPost(post.id, posts);
+
+      // Post directly to LinkedIn using the text from the URL payload
+      let result;
+      try {
+        const { postToLinkedIn } = await import("./src/linkedin.mjs");
+        await postToLinkedIn({ text: postData.text });
+        result = { success: true };
+      } catch(e) {
+        result = { success: false, message: e.message };
+      }
+
       res.writeHead(200, {"Content-Type":"text/html"});
       res.end(`<!DOCTYPE html><html><body style="font-family:'Helvetica Neue',sans-serif;background:#F0F4FA;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
         <div style="background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:440px;box-shadow:0 4px 24px rgba(0,0,0,.1)">
@@ -176,8 +188,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && route === "/reject-email") {
-      const post = posts.find(p => p.id === query.id && p.token === query.token);
-      if (post) await deletePost(post.id);
       res.writeHead(200, {"Content-Type":"text/html"});
       res.end(`<!DOCTYPE html><html><body style="font-family:'Helvetica Neue',sans-serif;background:#F0F4FA;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
         <div style="background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:440px;box-shadow:0 4px 24px rgba(0,0,0,.1)">
