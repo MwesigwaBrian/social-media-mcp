@@ -1,21 +1,27 @@
 import "dotenv/config";
 import { generatePost, savePendingPost, getPendingPosts, updatePostStatus, deletePost } from "./src/agent.mjs";
 import { approveAndPost } from "./src/linkedin.mjs";
-import { updatePostAnalytics, getAllAnalytics } from "./src/analytics.mjs";
-import { sendWeeklyReport } from "./src/emailReport.mjs";
+import { emailPostForApproval } from "./src/emailPost.mjs";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3000;
+const PORT      = process.env.PORT || 3000;
 
-// ─── HTTP Server (Approval Dashboard) ──────────────────────────────────────
+// ─── Helper: parse URL query params ────────────────────────────────────────
+function parseQuery(url) {
+  const q = {}; const parts = url.split("?")[1] || "";
+  parts.split("&").forEach(p => { const [k,v]=p.split("="); if(k) q[k]=decodeURIComponent(v||""); });
+  return q;
+}
 
+// ─── Dashboard HTML ─────────────────────────────────────────────────────────
 function getHTML(posts) {
   const pending = posts.filter(p => p.status === "pending");
-  const posted = posts.filter(p => p.status === "posted");
+  const posted  = posts.filter(p => p.status === "posted");
 
   const cards = pending.map(post => `
     <div class="card" id="card-${post.id}">
@@ -34,14 +40,14 @@ function getHTML(posts) {
           </div>
           <div class="text-panel">
             <h3>Post Copy</h3>
-            <div class="post-text" id="text-${post.id}" contenteditable="true">${post.text.replace(/\n/g, "<br>")}</div>
+            <div class="post-text" id="text-${post.id}" contenteditable="true">${post.text.replace(/\n/g,"<br>")}</div>
           </div>
         </div>
       </div>
       <div class="card-footer">
         <button class="btn btn-approve" onclick="approvePost('${post.id}')">✓ Approve & Post</button>
-        <button class="btn btn-edit" onclick="saveEdit('${post.id}')">✎ Save Edit</button>
-        <button class="btn btn-reject" onclick="rejectPost('${post.id}')">✗ Reject</button>
+        <button class="btn btn-edit"    onclick="saveEdit('${post.id}')">✎ Save Edit</button>
+        <button class="btn btn-reject"  onclick="rejectPost('${post.id}')">✗ Reject</button>
       </div>
     </div>`).join("");
 
@@ -49,7 +55,7 @@ function getHTML(posts) {
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>Tenovio — LinkedIn Approval</title>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;600&display=swap" rel="stylesheet">
   <style>
@@ -93,6 +99,7 @@ function getHTML(posts) {
     .toast.show{transform:translateY(0)}
     .toast.success{background:var(--green)}
     .toast.error{background:var(--red)}
+    .result-page{max-width:480px;margin:80px auto;text-align:center;padding:40px;background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(15,43,91,.10)}
     @media(max-width:768px){.post-preview{grid-template-columns:1fr}}
   </style>
 </head>
@@ -110,9 +117,10 @@ function getHTML(posts) {
 </header>
 <main class="main">
   <h1 class="section-title">Pending Approval</h1>
-  <p class="section-sub">Review each post before it goes live on LinkedIn.</p>
-  ${pending.length === 0 ? '<div class="empty-state"><h3>All caught up!</h3><p>No posts pending. New posts generate at 7AM, 11AM, 2PM, 5PM.</p></div>' : ''}
-  ${cards}
+  <p class="section-sub">Review posts here or approve directly from email.</p>
+  ${pending.length === 0
+    ? `<div class="empty-state"><h3>All caught up!</h3><p>Posts generate at 7AM, 11AM, 2PM, 5PM UTC and are emailed to you for approval.</p></div>`
+    : cards}
 </main>
 <script>
   function showToast(msg,type='success'){const t=document.getElementById('toast');t.textContent=(type==='success'?'✓ ':'✗ ')+msg;t.className='toast show '+type;setTimeout(()=>t.classList.remove('show'),3500)}
@@ -139,21 +147,62 @@ function getHTML(posts) {
 </body></html>`;
 }
 
+// ─── HTTP Server ────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   try {
-    const posts = await getPendingPosts();
-    if (req.method === "GET" && req.url === "/") {
-      res.writeHead(200, { "Content-Type": "text/html" });
+    const url    = req.url || "/";
+    const route  = url.split("?")[0];
+    const query  = parseQuery(url);
+    const posts  = await getPendingPosts();
+
+    // ── Email approve/reject one-click links ──────────────────────────────
+    if (req.method === "GET" && route === "/approve-email") {
+      const post = posts.find(p => p.id === query.id && p.token === query.token);
+      if (!post) {
+        res.writeHead(404, {"Content-Type":"text/html"});
+        res.end(`<div style="font-family:sans-serif;text-align:center;padding:60px">Post not found or already actioned.</div>`);
+        return;
+      }
+      const result = await approveAndPost(post.id, posts);
+      res.writeHead(200, {"Content-Type":"text/html"});
+      res.end(`<!DOCTYPE html><html><body style="font-family:'Helvetica Neue',sans-serif;background:#F0F4FA;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+        <div style="background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:440px;box-shadow:0 4px 24px rgba(0,0,0,.1)">
+          ${result.success
+            ? `<div style="font-size:48px">🎉</div><h2 style="color:#00A878;margin:16px 0 8px">Posted to LinkedIn!</h2><p style="color:#6B7FA3">Your post is now live.</p>`
+            : `<div style="font-size:48px">❌</div><h2 style="color:#E53E3E;margin:16px 0 8px">Failed to post</h2><p style="color:#6B7FA3">${result.message}</p>`}
+          <a href="/" style="display:inline-block;margin-top:24px;background:#0F2B5B;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">Back to dashboard</a>
+        </div></body></html>`);
+      return;
+    }
+
+    if (req.method === "GET" && route === "/reject-email") {
+      const post = posts.find(p => p.id === query.id && p.token === query.token);
+      if (post) await deletePost(post.id);
+      res.writeHead(200, {"Content-Type":"text/html"});
+      res.end(`<!DOCTYPE html><html><body style="font-family:'Helvetica Neue',sans-serif;background:#F0F4FA;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+        <div style="background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:440px;box-shadow:0 4px 24px rgba(0,0,0,.1)">
+          <div style="font-size:48px">🗑️</div>
+          <h2 style="color:#0D1B35;margin:16px 0 8px">Post rejected</h2>
+          <p style="color:#6B7FA3">The post has been discarded.</p>
+          <a href="/" style="display:inline-block;margin-top:24px;background:#0F2B5B;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">Back to dashboard</a>
+        </div></body></html>`);
+      return;
+    }
+
+    // ── Dashboard ─────────────────────────────────────────────────────────
+    if (req.method === "GET" && route === "/") {
+      res.writeHead(200, {"Content-Type":"text/html"});
       res.end(getHTML(posts));
       return;
     }
+
     if (req.method === "POST") {
       let body = "";
       req.on("data", c => body += c);
       req.on("end", async () => {
         const { postId, text } = JSON.parse(body);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        if (req.url === "/approve") {
+        res.writeHead(200, {"Content-Type":"application/json"});
+        if (route === "/approve") {
           if (text) {
             const post = posts.find(p => p.id === postId);
             if (post) {
@@ -163,17 +212,17 @@ const server = http.createServer(async (req, res) => {
           }
           const result = await approveAndPost(postId, await getPendingPosts());
           res.end(JSON.stringify(result));
-        } else if (req.url === "/reject") {
+        } else if (route === "/reject") {
           await deletePost(postId);
-          res.end(JSON.stringify({ success: true }));
-        } else if (req.url === "/edit") {
+          res.end(JSON.stringify({success:true}));
+        } else if (route === "/edit") {
           const post = posts.find(p => p.id === postId);
           if (post) {
             post.text = text;
             await fs.writeFile(path.join(__dirname, `data/pending/${postId}.json`), JSON.stringify(post, null, 2));
-            res.end(JSON.stringify({ success: true }));
+            res.end(JSON.stringify({success:true}));
           } else {
-            res.end(JSON.stringify({ success: false }));
+            res.end(JSON.stringify({success:false}));
           }
         } else {
           res.writeHead(404); res.end();
@@ -181,6 +230,7 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+
     res.writeHead(404); res.end("Not found");
   } catch (err) {
     console.error("Server error:", err);
@@ -190,87 +240,76 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`\n🚀 Tenovio LinkedIn Agent started`);
-  console.log(`🌐 Approval dashboard: http://localhost:${PORT}`);
-  console.log(`📅 Generating posts at: 7AM, 11AM, 2PM, 5PM daily\n`);
+  console.log(`🌐 Dashboard: http://localhost:${PORT}`);
+  console.log(`📧 Posts will be emailed to: ${process.env.REPORT_EMAIL || "mweesiigwabrian@gmail.com"}`);
+  console.log(`📅 Schedule: 7AM, 11AM, 2PM, 5PM UTC\n`);
 });
 
 // ─── Scheduler ──────────────────────────────────────────────────────────────
-
 const GENERATION_HOURS = [7, 11, 14, 17];
 
 async function runGeneration(slotIndex) {
-  console.log(`\n🤖 [${new Date().toLocaleTimeString()}] Generating post for slot ${slotIndex + 1}/4...`);
+  console.log(`\n🤖 [${new Date().toISOString()}] Generating post for slot ${slotIndex + 1}/4...`);
   try {
+    // Generate post
     const post = await generatePost(slotIndex);
+
+    // Add a secure token for email approve/reject links
+    post.token = crypto.randomBytes(16).toString("hex");
+
+    // Save to disk (best-effort — may be wiped on restart but email is the backup)
     await savePendingPost(post);
-    console.log(`✅ Post queued for approval`);
+
+    // ✅ Email immediately — this survives restarts
+    await emailPostForApproval(post);
+
+    console.log(`✅ Post generated and emailed for approval`);
   } catch (err) {
     console.error(`❌ Failed to generate post:`, err.message);
   }
 }
 
-async function scheduleLoop() {
-  const now = new Date();
+function getNextSlot() {
+  const now = Date.now();
+  const d   = new Date();
   for (let i = 0; i < GENERATION_HOURS.length; i++) {
-    if (now.getHours() === GENERATION_HOURS[i] && now.getMinutes() < 5) {
-      await runGeneration(i);
+    const slotTime = Date.UTC(
+      d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(),
+      GENERATION_HOURS[i], 0, 0
+    );
+    if (slotTime - now > 2 * 60 * 1000) {
+      return { slotIndex: i, slotTime, diffMs: slotTime - now };
     }
   }
+  const tomorrow = Date.UTC(
+    d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1,
+    GENERATION_HOURS[0], 0, 0
+  );
+  return { slotIndex: 0, slotTime: tomorrow, diffMs: tomorrow - now };
+}
 
+async function scheduleLoop() {
   while (true) {
-    const now = new Date();
-    let nextTime = null;
-    let nextSlot = 0;
+    const { slotIndex, slotTime, diffMs } = getNextSlot();
+    const mins = Math.round(diffMs / 60000);
+    console.log(`⏰ Next post: slot ${slotIndex + 1} at ${new Date(slotTime).toISOString()} (in ${mins} min)`);
 
-    for (let i = 0; i < GENERATION_HOURS.length; i++) {
-      const hour = GENERATION_HOURS[i];
-      if (now.getHours() < hour || (now.getHours() === hour && now.getMinutes() < 1)) {
-        nextTime = new Date(); nextTime.setHours(hour, 0, 0, 0);
-        nextSlot = i; break;
-      }
+    // Sleep until 30s before slot
+    if (diffMs > 30000) {
+      await new Promise(r => setTimeout(r, diffMs - 30000));
     }
 
-    if (!nextTime) {
-      nextTime = new Date(); nextTime.setDate(nextTime.getDate() + 1);
-      nextTime.setHours(GENERATION_HOURS[0], 0, 0, 0); nextSlot = 0;
+    // Fine-wait to exact time
+    while (Date.now() < slotTime) {
+      await new Promise(r => setTimeout(r, 1000));
     }
 
-    const ms = nextTime - new Date();
-    console.log(`⏰ Next post in ${Math.round(ms / 60000)} minutes`);
-    await new Promise(r => setTimeout(r, ms));
-    await runGeneration(nextSlot);
+    await runGeneration(slotIndex);
+
+    // Safety gap — prevents re-running same slot
+    console.log(`💤 Cooling down 5 minutes...`);
+    await new Promise(r => setTimeout(r, 5 * 60 * 1000));
   }
 }
 
 scheduleLoop().catch(console.error);
-
-// ─── Analytics Poller (runs every 6 hours) ──────────────────────────────────
-
-async function pollAnalytics() {
-  console.log("📊 Polling LinkedIn analytics...");
-  try {
-    const records = await getAllAnalytics();
-    for (const record of records) {
-      await updatePostAnalytics(record.postId);
-    }
-    console.log(`✅ Updated analytics for ${records.length} posts`);
-  } catch (err) {
-    console.error("❌ Analytics poll failed:", err.message);
-  }
-}
-
-// Poll every 6 hours
-setInterval(pollAnalytics, 6 * 60 * 60 * 1000);
-
-// ─── Weekly Email Report (every Monday at 8AM) ───────────────────────────────
-
-async function checkWeeklyReport() {
-  const now = new Date();
-  if (now.getDay() === 1 && now.getHours() === 8 && now.getMinutes() < 5) {
-    console.log("📧 Sending weekly LinkedIn report...");
-    await sendWeeklyReport();
-  }
-}
-
-// Check every 5 minutes if it's time to send the weekly report
-setInterval(checkWeeklyReport, 5 * 60 * 1000);
